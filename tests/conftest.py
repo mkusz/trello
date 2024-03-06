@@ -10,6 +10,7 @@ sys.path.append(".")
 
 from src import configs
 from src import loggers
+from src.page_object_models import trello_pom
 
 
 def log() -> logging.Logger:
@@ -129,3 +130,9 @@ def playwright_page(
         new_video_path = f"{artifact_file_name}{video_path.suffix}"
         video_path.rename(new_video_path)
         log().info(f"New video file name: {new_video_path}")
+
+
+@allure.title("Fixture: Trello POM")
+@pytest.fixture()
+def trello_page(playwright_page: playwright.Page) -> trello_pom.TrelloPOM:
+    return trello_pom.TrelloPOM(page=playwright_page)
