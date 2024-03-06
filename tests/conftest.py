@@ -1,11 +1,34 @@
 import pytest
+import logging
 import allure
 import sys
+import pathlib
+from datetime import datetime
+import playwright.sync_api as playwright
 
 sys.path.append(".")
-print(sys.path)
+
 from src import configs
-import playwright.sync_api as playwright
+from src import loggers
+
+
+def log() -> logging.Logger:
+    return logging.getLogger(__name__)
+
+
+@pytest.hookimpl(tryfirst=True, hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """pytest hook that adds status for various stages of test execution
+
+    Outcome test phase status into request.node.stash["status"].
+    There are 3 different phases: "setup", "call" and "teardown".
+    More information can be found at below link:
+    https://docs.pytest.org/en/latest/example/simple.html#making-test-result-information-available-in-fixtures
+    """
+    outcome = yield
+    rep = outcome.get_result()
+    item.stash.setdefault("status", {})[rep.when] = rep.outcome
+    return outcome
 
 
 @pytest.fixture(scope="session")
@@ -16,6 +39,25 @@ def env_config() -> configs.EnvConfig:
 @pytest.fixture(scope="session")
 def playwright_config() -> configs.PlaywrightConfig:
     return configs.PlaywrightConfig()
+
+
+@pytest.fixture(scope="session")
+def session_timestamp() -> str:
+    """Provides a session timestamp used in file names"""
+    now = datetime.utcnow()
+    return now.strftime("%Y%m%d%H%M%S")
+
+
+@allure.title("Fixture: reporting")
+@pytest.fixture(scope="session", autouse=True)
+def reporting_setup(env_config: configs.EnvConfig):
+    if env_config.artifacts_remove_old:
+        for file in pathlib.Path(env_config.artifacts_dir).rglob("*"):
+            try:
+                pathlib.Path(file).unlink(missing_ok=True)
+            except PermissionError:
+                pass
+    loggers.configure_logging_from_yaml_file()
 
 
 @allure.title("Fixture: Playwright browser")
@@ -44,11 +86,21 @@ def playwright_browser(
 @allure.title("Fixture: Playwright page")
 @pytest.fixture()
 def playwright_page(
+    request: pytest.FixtureRequest,
     playwright_browser: playwright.Browser,
     playwright_config: configs.PlaywrightConfig,
     env_config: configs.EnvConfig,
+    session_timestamp: str,
 ) -> playwright.Page:
-    browser_context = playwright_browser.new_context()
+    browser_context = playwright_browser.new_context(
+        record_video_dir=env_config.artifacts_dir,
+    )
+
+    if playwright_config.tracing_enable:
+        browser_context.tracing.start(
+            screenshots=playwright_config.tracing_screenshots,
+            snapshots=playwright_config.tracing_snapshots,
+        )
 
     new_page: playwright.Page = browser_context.new_page()
 
@@ -58,4 +110,22 @@ def playwright_page(
 
         yield page
 
+        video_path = pathlib.Path(page.video.path()) if page.video else None
+
+    try:
+        test_status = request.node.stash["status"]["call"][:4]
+    except KeyError:
+        test_status = "unkn"
+    artifact_file_name = (
+        f"{env_config.artifacts_dir}{session_timestamp}_{test_status}_{request.node.name}"
+    )
+
+    if playwright_config.tracing_enable:
+        browser_context.tracing.stop(path=f"{artifact_file_name}.zip")
+
     browser_context.close()
+
+    if video_path and video_path.exists():
+        new_video_path = f"{artifact_file_name}{video_path.suffix}"
+        video_path.rename(new_video_path)
+        log().info(f"New video file name: {new_video_path}")
